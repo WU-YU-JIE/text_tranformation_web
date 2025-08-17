@@ -1,11 +1,14 @@
 # app.py
 from flask import Flask, render_template_string, request, jsonify
+from flask_cors import CORS
 from datetime import datetime
 import os
+import json
 
 app = Flask(__name__)
+CORS(app)  # 允許跨域請求
 
-# 使用記憶體儲存（適合免費方案）
+# 使用記憶體儲存
 text_storage = {
     'content': '',
     'last_update': None,
@@ -84,17 +87,18 @@ HTML_TEMPLATE = '''
             box-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
         }
         
+        .status-dot.syncing {
+            background: #FFC107;
+        }
+        
+        .status-dot.error {
+            background: #f44336;
+            animation: none;
+        }
+        
         @keyframes pulse {
             0%, 100% { transform: scale(1); opacity: 1; }
             50% { transform: scale(1.1); opacity: 0.7; }
-        }
-        
-        .connection-count {
-            background: #667eea;
-            color: white;
-            padding: 4px 12px;
-            border-radius: 15px;
-            font-size: 13px;
         }
         
         textarea {
@@ -149,7 +153,6 @@ HTML_TEMPLATE = '''
         
         .copy-button.copied {
             background: linear-gradient(135deg, #805ad5, #6b46c1);
-            animation: success 0.5s;
         }
         
         .share-button {
@@ -160,11 +163,6 @@ HTML_TEMPLATE = '''
         .share-button:hover {
             transform: translateY(-2px);
             box-shadow: 0 8px 20px rgba(237, 137, 54, 0.3);
-        }
-        
-        @keyframes success {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.05); }
         }
         
         .info-bar {
@@ -204,17 +202,16 @@ HTML_TEMPLATE = '''
             transform: translateY(0);
         }
         
-        .warning {
-            background: #fff5f5;
-            border: 1px solid #feb2b2;
-            color: #c53030;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
+        .debug-info {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-family: monospace;
         }
         
         @media (max-width: 600px) {
@@ -239,17 +236,13 @@ HTML_TEMPLATE = '''
             <div class="subtitle">即時同步・全球訪問・免費使用</div>
         </div>
         
-        <div class="warning">
-            ⚠️ 提醒：此為公開網址，請勿儲存敏感資料。伺服器重啟後資料會清空。
-        </div>
-        
         <div class="status-bar">
             <div class="status-indicator">
-                <div class="status-dot"></div>
-                <span>雲端連線中</span>
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">連線中</span>
             </div>
-            <div class="connection-count">
-                <span id="viewCount">1</span> 個裝置連線
+            <div>
+                版本: <span id="versionDisplay">{{ version }}</span>
             </div>
         </div>
         
@@ -282,61 +275,153 @@ HTML_TEMPLATE = '''
         </div>
     </div>
     
-    <div class="sync-badge" id="syncBadge">
-        ✨ 已同步
-    </div>
+    <div class="sync-badge" id="syncBadge">✨ 已同步</div>
+    
+    <!-- Debug 資訊 -->
+    <div class="debug-info" id="debugInfo"></div>
     
     <script>
         let currentVersion = {{ version }};
         let isTyping = false;
         let typingTimer;
         let saveTimer;
+        let syncFailCount = 0;
+        
         const textArea = document.getElementById('textContent');
         const charCount = document.getElementById('charCount');
         const syncBadge = document.getElementById('syncBadge');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const debugInfo = document.getElementById('debugInfo');
+        const versionDisplay = document.getElementById('versionDisplay');
         
         // 初始化
         updateCharCount();
-        updateViewCount();
+        startSync();
         
-        // 監聽輸入 - 防抖動儲存
+        // 顯示 debug 資訊
+        function updateDebug(msg) {
+            debugInfo.textContent = `[${new Date().toLocaleTimeString()}] ${msg} | Ver: ${currentVersion}`;
+        }
+        
+        // 監聽輸入
         textArea.addEventListener('input', function() {
             isTyping = true;
             clearTimeout(typingTimer);
             clearTimeout(saveTimer);
             updateCharCount();
             
-            // 300ms 後儲存
+            // 顯示同步中狀態
+            statusDot.classList.add('syncing');
+            statusText.textContent = '同步中...';
+            
+            // 立即儲存
             saveTimer = setTimeout(() => {
                 saveText();
-            }, 300);
+            }, 200);
             
-            // 1秒後解除輸入狀態
+            // 停止輸入後標記
             typingTimer = setTimeout(() => {
                 isTyping = false;
             }, 1000);
         });
         
         // 儲存文字
-        function saveText() {
-            const content = textArea.value;
-            
-            fetch('/save', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ content: content })
-            })
-            .then(response => response.json())
-            .then(data => {
+        async function saveText() {
+            try {
+                const response = await fetch('/api/save', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ 
+                        content: textArea.value,
+                        version: currentVersion 
+                    })
+                });
+                
+                if (!response.ok) throw new Error('Save failed');
+                
+                const data = await response.json();
                 currentVersion = data.version;
+                versionDisplay.textContent = currentVersion;
+                
                 showSyncBadge();
                 updateLastUpdate(data.last_update);
-            })
-            .catch(error => {
+                updateDebug(`已儲存 v${currentVersion}`);
+                
+                // 恢復正常狀態
+                statusDot.classList.remove('syncing', 'error');
+                statusText.textContent = '已連線';
+                syncFailCount = 0;
+                
+            } catch (error) {
                 console.error('儲存失敗:', error);
-            });
+                statusDot.classList.add('error');
+                statusText.textContent = '儲存失敗';
+                updateDebug('儲存失敗: ' + error.message);
+            }
+        }
+        
+        // 檢查更新
+        async function checkUpdate() {
+            if (isTyping) {
+                updateDebug('輸入中，跳過同步');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/sync?v=' + currentVersion);
+                
+                if (!response.ok) throw new Error('Sync failed');
+                
+                const data = await response.json();
+                
+                if (data.version !== currentVersion) {
+                    updateDebug(`發現新版本 v${data.version}`);
+                    currentVersion = data.version;
+                    versionDisplay.textContent = currentVersion;
+                    
+                    // 保存游標位置
+                    const cursorPos = textArea.selectionStart;
+                    const scrollPos = textArea.scrollTop;
+                    
+                    // 更新內容
+                    textArea.value = data.content;
+                    
+                    // 恢復游標位置
+                    if (!document.hasFocus() || document.activeElement !== textArea) {
+                        textArea.selectionStart = cursorPos;
+                        textArea.selectionEnd = cursorPos;
+                        textArea.scrollTop = scrollPos;
+                    }
+                    
+                    updateCharCount();
+                    updateLastUpdate(data.last_update);
+                    showSyncBadge();
+                }
+                
+                // 更新狀態
+                statusDot.classList.remove('error', 'syncing');
+                statusText.textContent = '已連線';
+                syncFailCount = 0;
+                
+            } catch (error) {
+                syncFailCount++;
+                console.error('同步失敗:', error);
+                updateDebug('同步失敗 #' + syncFailCount);
+                
+                if (syncFailCount > 3) {
+                    statusDot.classList.add('error');
+                    statusText.textContent = '連線中斷';
+                }
+            }
+        }
+        
+        // 開始同步循環
+        function startSync() {
+            setInterval(checkUpdate, 1000);  // 每秒檢查
+            updateDebug('同步已啟動');
         }
         
         // 複製文字
@@ -356,12 +441,6 @@ HTML_TEMPLATE = '''
                 .catch(() => {
                     textArea.select();
                     document.execCommand('copy');
-                    copyBtn.classList.add('copied');
-                    copyBtnText.textContent = '已複製！';
-                    setTimeout(() => {
-                        copyBtn.classList.remove('copied');
-                        copyBtnText.textContent = '複製全部文字';
-                    }, 2000);
                 });
         }
         
@@ -374,22 +453,12 @@ HTML_TEMPLATE = '''
                     title: '雲端文字傳輸平台',
                     text: '使用這個連結即時分享文字',
                     url: url
-                }).catch(() => {
-                    copyLink(url);
                 });
             } else {
-                copyLink(url);
-            }
-        }
-        
-        function copyLink(url) {
-            navigator.clipboard.writeText(url)
-                .then(() => {
-                    alert('連結已複製！\n' + url);
-                })
-                .catch(() => {
-                    prompt('複製此連結：', url);
+                navigator.clipboard.writeText(url).then(() => {
+                    alert('連結已複製！');
                 });
+            }
         }
         
         // 更新字數
@@ -405,7 +474,7 @@ HTML_TEMPLATE = '''
             }, 1500);
         }
         
-        // 更新最後更新時間
+        // 更新時間
         function updateLastUpdate(time) {
             const lastUpdate = document.getElementById('lastUpdate');
             if (time) {
@@ -413,63 +482,33 @@ HTML_TEMPLATE = '''
             }
         }
         
-        // 更新連線數
-        function updateViewCount() {
-            fetch('/active-count')
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('viewCount').textContent = data.count;
-                });
-        }
-        
-        // 自動同步 - 每1.5秒
-        setInterval(() => {
-            if (isTyping) return;
-            
-            fetch('/check-update')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.version !== currentVersion) {
-                        currentVersion = data.version;
-                        textArea.value = data.content;
-                        updateCharCount();
-                        updateLastUpdate(data.last_update);
-                        showSyncBadge();
-                    }
-                });
-        }, 1500);
-        
-        // 每5秒更新連線數
-        setInterval(updateViewCount, 5000);
-        
         // 頁面關閉前儲存
         window.addEventListener('beforeunload', function() {
-            if (textArea.value) {
-                navigator.sendBeacon('/save', JSON.stringify({ 
-                    content: textArea.value 
+            if (textArea.value && textArea.value !== '') {
+                navigator.sendBeacon('/api/save', JSON.stringify({ 
+                    content: textArea.value,
+                    version: currentVersion
                 }));
             }
+        });
+        
+        // 監測連線狀態
+        window.addEventListener('online', () => {
+            statusText.textContent = '重新連線中...';
+            checkUpdate();
+        });
+        
+        window.addEventListener('offline', () => {
+            statusDot.classList.add('error');
+            statusText.textContent = '離線';
         });
     </script>
 </body>
 </html>
 '''
 
-# 追蹤活躍連線
-active_connections = {}
-
 @app.route('/')
 def index():
-    client_ip = request.remote_addr
-    active_connections[client_ip] = datetime.now()
-    
-    # 清理超過10秒未活動的連線
-    now = datetime.now()
-    active_connections_copy = active_connections.copy()
-    for ip, last_seen in active_connections_copy.items():
-        if (now - last_seen).seconds > 10:
-            del active_connections[ip]
-    
     return render_template_string(
         HTML_TEMPLATE,
         content=text_storage['content'],
@@ -477,42 +516,53 @@ def index():
         version=text_storage['version']
     )
 
-@app.route('/save', methods=['POST'])
+@app.route('/api/save', methods=['POST'])
 def save():
-    data = request.json
-    text_storage['content'] = data.get('content', '')
-    text_storage['last_update'] = datetime.now().strftime('%m/%d %H:%M:%S')
-    text_storage['version'] += 1
-    
-    return jsonify({
-        'status': 'success',
-        'version': text_storage['version'],
-        'last_update': text_storage['last_update']
-    })
+    try:
+        # 處理不同的 Content-Type
+        if request.content_type == 'application/json':
+            data = request.json
+        else:
+            data = json.loads(request.data)
+        
+        text_storage['content'] = data.get('content', '')
+        text_storage['version'] += 1
+        text_storage['last_update'] = datetime.now().strftime('%m/%d %H:%M:%S')
+        
+        print(f"[SAVE] Version {text_storage['version']}, {len(text_storage['content'])} chars")
+        
+        return jsonify({
+            'status': 'success',
+            'version': text_storage['version'],
+            'last_update': text_storage['last_update']
+        })
+    except Exception as e:
+        print(f"[ERROR] Save failed: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/check-update')
-def check_update():
-    client_ip = request.remote_addr
-    active_connections[client_ip] = datetime.now()
-    
-    return jsonify({
-        'content': text_storage['content'],
-        'last_update': text_storage['last_update'],
-        'version': text_storage['version']
-    })
+@app.route('/api/sync')
+def sync():
+    try:
+        client_version = request.args.get('v', 0, type=int)
+        
+        # 只在版本不同時回傳內容
+        if client_version != text_storage['version']:
+            print(f"[SYNC] Client v{client_version} -> Server v{text_storage['version']}")
+        
+        return jsonify({
+            'content': text_storage['content'],
+            'version': text_storage['version'],
+            'last_update': text_storage['last_update']
+        })
+    except Exception as e:
+        print(f"[ERROR] Sync failed: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/active-count')
-def active_count():
-    # 清理超過10秒未活動的連線
-    now = datetime.now()
-    active_connections_copy = active_connections.copy()
-    for ip, last_seen in active_connections_copy.items():
-        if (now - last_seen).seconds > 10:
-            del active_connections[ip]
-    
-    return jsonify({'count': len(active_connections)})
+@app.route('/health')
+def health():
+    return jsonify({'status': 'healthy', 'version': text_storage['version']})
 
 if __name__ == '__main__':
-    # Render 會設定 PORT 環境變數
     port = int(os.environ.get('PORT', 5000))
+    print(f"Starting server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
